@@ -4,7 +4,7 @@
 import csv, plistlib, tempfile, argparse
 import sys, subprocess, os, re, glob
 import time, datetime, math
-import feedparser, urllib2, httplib2
+import feedparser, urllib2, httplib2, string
 
 from collections import defaultdict
 from datetime import datetime
@@ -19,6 +19,7 @@ sleep_randoms = [32, 22, 32, 24, 35, 6, 1, 40, 16, 41, 17, 6, 5, 30, 25, 20, 23,
 last_sleep_time = 0
 
 bad_mp3_links = []
+bad_mp3_file_duration = []
 
 def get_sleep_time():
 	global sleep_count
@@ -51,6 +52,9 @@ def sleep_for_a_bit():
 	time.sleep(stime)
 	print "That was a nice '" + str(stime) + "' second nap.  Time to go work again!"
 
+_total_runtime_regex = r'(Total Running Time: (?:[0-9]:)?(?:[0-9]{2}:)?(?:[0-9]{2})[.]?)'
+_ellipsis_box_regex = r'(\[[.]{3}\])'
+_find_total_runtime = re.compile('(Total Running Time: (?:[0-9]:)?(?:[0-9]{2}:)?(?:[0-9]{2})\.?)', re.I + re.MULTILINE)
 
 _find_duration = re.compile( '.*Duration: ([0-9:]+)', re.MULTILINE )
 
@@ -79,6 +83,10 @@ def seconds_to_min_sec( secs ):
   secs = int(secs - (mins * 60))
   return "%d:%02d" % (mins, secs)
 
+def cleanup_description(description):
+	description = re.sub(_total_runtime_regex, "", description, flags=re.I)
+	description =  re.sub(_ellipsis_box_regex, "", description, flags=re.M)
+	return description.strip()
 
 def retrieve_length( path ):
 	"Determine length of tracks listed in the given input files (e.g. playlists)."
@@ -132,6 +140,8 @@ def podcastDataFromPodcastRSSFeed():
 	rss_url = "http://insideacting.podbean.com/feed/"
 	feed = feedparser.parse(rss_url)
 	items = feed["items"]
+	print items
+	exit()
 	podcasts_dict = defaultdict(str)
 	
 	for item in items:
@@ -142,8 +152,12 @@ def podcastDataFromPodcastRSSFeed():
 			thumbnailUrl = ""
 			podcastUrl = item["link"]
 			mediaUrl = ""
-			description = item["description"]
-			published = time.mktime(datetime.strptime(item["published"], "%a, %d %b %Y %H:%M:%S +0000").timetuple())
+			description	 = cleanup_description(item["description"])
+			print description
+			if "published" in item:
+				published = time.mktime(datetime.strptime(item["published"], "%a, %d %b %Y %H:%M:%S +0000").timetuple())
+			else:
+				published = ""
 			title = item["title"]
 
 #			print item["title"] + " (" + item["published"] + " ): " + item["link"] + "\n " + item["description"] + "\n"
@@ -168,6 +182,10 @@ def podcastDataFromPodcastRSSFeed():
 			podcasts_dict[episode_num] = podcast
 	return podcasts_dict
 
+def podcastsDataFromBlipTVRSSFeed():
+	rss_url = "http://blip.tv/insideacting/rss"
+	feed = feedparser.parse(rss_url)
+	items = feed["items"]
 
 def podcastsDataFromWebsiteRSSFeed():
 	rss_url = "http://www.insideactingpodcast.com/feeds/posts/default?alt=rss&max-results=500"
@@ -212,14 +230,27 @@ def podcastsDataFromWebsiteRSSFeed():
 					if "mp3" in url:
 						return url
 		return ""
+		
+	def extractTagsFromItem(item):
+		tags = []
+	 	if 'tags' in item:
+			for sel in item['tags']:
+				tag = sel['term'].title()
+				tags.append(tag)
+		return tags
 
 	for item in items:
+		#exit()
 		episode_num = episodeNumberFromTitle(item["title"])
 		if episode_num:
 			urls = findURLTypesInText(item["summary"])
 			thumbnailUrl = urls["jpg"]
 			mediaUrl = urls["mp3"]
 			urlsSummary = ", ".join(urls["urls"])
+			
+			tags = extractTagsFromItem(item)
+#			print string.join(tags, ";")
+
 #			thumbnailUrl = findImageURLInText(item["summary"])
 #			mediaUrl = findMediaURLInText(item["summary"])
 			if not mediaUrl:
@@ -232,7 +263,7 @@ def podcastsDataFromWebsiteRSSFeed():
 				print "EPISODE " + episode_num + ": has no thumbnailUrl; \n" + item["link"]
 				print urlsSummary + "\n--------"
 					
-			podcast = {"thumbnailUrl":thumbnailUrl,"mediaUrl":mediaUrl,"link":item["link"],"description":item["summary"]}
+			podcast = {"thumbnailUrl":thumbnailUrl,"mediaUrl":mediaUrl,"link":item["link"],"description":item["summary"],"tags":tags}
 			podcasts_dict[episode_num] = podcast
 
 	return podcasts_dict
@@ -332,6 +363,9 @@ def durationFromMediaUrl(mediaUrl):
 	
 	
 
+#podcastsDataFromBlipTVRSSFeed()
+#podcastsDataFromWebsiteRSSFeed()
+#exit()
 #print podcastDataFromPodcastRSSFeed()
 podcasts_itunes = podcastDataFromPodcastRSSFeed()
 podcasts_web = podcastsDataFromWebsiteRSSFeed()
@@ -374,7 +408,14 @@ for key in podcasts_itunes.viewkeys():
 	duration = durationFromMediaUrl(mediaUrl)
 	if duration:
 		podcast["duration"] = float(duration)
-	print "duration: " + str(duration)
+	else:
+		podcast["duration"] = float(0)
+		bad_mp3_file_duration.append(mediaUrl)
+		
+	if "tags" in pw:
+		podcast["tags"] = pw["tags"]
+	else:
+		podcast["tags"] = []
 
 	podcasts[key] = podcast
 	count = count + 1
@@ -383,9 +424,10 @@ print "Total episodes: " + str(count)
 plistlib.writePlist(podcasts, output_file)
 
 
-print "ERROR: Couldn't get accurate times for the following mp3s"
-print bad_mp3_links
-#print podcasts_list
-#rint blog_podcast_list
-#print podcasts
-#print missing_media
+if len(bad_mp3_links):
+	print "ERROR: Couldn't get files for the following mp3s"
+	print bad_mp3_links
+
+if len(bad_mp3_file_duration):
+	print "ERROR: Couldn't get accurate duration for files for the following mp3s"
+	print bad_mp3_file_duration
